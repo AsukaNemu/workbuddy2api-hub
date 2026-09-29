@@ -55,7 +55,8 @@ def save(accounts_dir, data):
         os.makedirs(accounts_dir, exist_ok=True)
         path = settings_path(accounts_dir)
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
         return path

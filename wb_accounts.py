@@ -362,7 +362,8 @@ class Account(object):
         with self._save_lock:
             tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
             try:
-                with open(tmp, "w", encoding="utf-8") as fh:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump(self.to_dict(), fh, ensure_ascii=False, indent=2)
                 os.replace(tmp, path)
             except Exception:

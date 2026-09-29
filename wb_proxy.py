@@ -7087,7 +7087,11 @@ def _bootstrap_runtime(args):
     global SCHEDULER
     from wb_scheduler import Scheduler
     SCHEDULER = Scheduler(POOL)
-    SCHEDULER.start()
+    if os.environ.get("WB_DISABLE_SCHEDULER") == "1":
+        SCHEDULER.enabled = False
+        log("scheduler  : disabled for local QQ Agent Plus bridge")
+    else:
+        SCHEDULER.start()
     return api_key_generated
 
 def _report_first_run(args):
