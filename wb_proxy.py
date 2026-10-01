@@ -28,6 +28,12 @@ MAX_PAYLOAD_BYTES = int(os.environ.get("WB_MAX_PAYLOAD_BYTES", 50 * 1024 * 1024)
 # forever.
 MAX_CONCURRENT_CHAT = int(os.environ.get("WB_MAX_CONCURRENT_CHAT", 32))
 CHAT_SLOT_WAIT_SECONDS = float(os.environ.get("WB_CHAT_SLOT_WAIT", 30))
+# The upstream request is forced to SSE even for a client-side non-streaming
+# request.  A connection can therefore succeed and still fail while the SSE
+# body is being read (notably IncompleteRead(0 bytes read)).  Keep this retry
+# deliberately small: the client has received no response body yet, but the
+# upstream may already have counted the attempt.
+NONSTREAM_READ_RETRIES = max(0, int(os.environ.get("WB_NONSTREAM_READ_RETRIES", 1)))
 import socket
 import sys
 import threading
@@ -3598,6 +3604,46 @@ def aggregate_stream(raw_iter, model, resp_id):
     out["elapsed_ms"] = int((time.time() - started) * 1000)
     out["first_chunk_at"] = first_chunk_at
     return out
+
+
+def aggregate_nonstream_with_retry(upstream, model, payload, session_key,
+                                   realm, account, opener=None):
+    """Aggregate a hidden SSE response, retrying one transient read failure.
+
+    ``open_upstream`` already retries failures that happen while opening the
+    HTTP request.  This covers the later failure mode where the connection is
+    accepted but the peer closes it before (or during) the SSE body.  The
+    caller has not received a response body in this non-streaming path, so a
+    bounded retry is preferable to returning a transient 502.  The active
+    response is returned so the caller can close a replacement response too.
+    """
+    opener = opener or open_upstream
+    active = upstream
+    active_account = account
+    last_error = None
+    for attempt in range(NONSTREAM_READ_RETRIES + 1):
+        try:
+            result = aggregate_stream(active, model, None)
+            return active, active_account, result, None
+        except Exception as exc:
+            last_error = exc
+            if attempt >= NONSTREAM_READ_RETRIES or not is_transient(exc):
+                break
+            try:
+                active.close()
+            except Exception:
+                pass
+            log("non-stream upstream read hiccup for '%s' (%s), retrying (%d/%d)"
+                % (model, type(exc).__name__, attempt + 1, NONSTREAM_READ_RETRIES),
+                level="WARN")
+            try:
+                active, active_account = opener(
+                    payload, session_key=session_key, target_realm=realm)
+            except Exception as retry_exc:
+                log("non-stream retry could not reopen '%s' (%s)"
+                    % (model, type(retry_exc).__name__), level="WARN")
+                break
+    return active, active_account, None, last_error
 # ---------------------------------------------------------------------------
 # Responses API (/v1/responses) <-> Chat Completions translation
 # ---------------------------------------------------------------------------
@@ -6851,7 +6897,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._chat_stream_response(
                     upstream, model, fp, account, t_start)
             return self._chat_nonstream_response(
-                upstream, model, fp, account, t_start)
+                upstream, model, fp, account, t_start,
+                payload=payload, session_key=session_key, realm=req_realm)
 
     def _chat_stream_response(self, upstream, model, fp, account, t_start):
             self.send_response(200)
@@ -6940,22 +6987,34 @@ class Handler(BaseHTTPRequestHandler):
                          fp=fp, account=account.uid)
             return
 
-    def _chat_nonstream_response(self, upstream, model, fp, account, t_start):
+    def _chat_nonstream_response(self, upstream, model, fp, account, t_start,
+                                 payload=None, session_key=None, realm=None):
+        active = upstream
         try:
-            result = aggregate_stream(upstream, model, None)
-        except Exception as exc:
-            record_error(model, 502, str(exc), elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=account.uid)
-            return self._error(502, f"upstream stream error: {exc}")
-        wall = int((time.time() - t_start) * 1000)
-        first_at = result.get("first_chunk_at")
-        # Measured from request arrival so streaming and non-streaming are comparable.
-        first_ms = int((first_at - t_start) * 1000) if first_at else None
-        record_usage(model, result.get("usage"), stream=False,
-                     elapsed_ms=wall, ttft_ms=first_ms,
-                     gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid)
-        return self._json(200, result)
+            active, account, result, error = aggregate_nonstream_with_retry(
+                upstream, model, payload or {}, session_key, realm, account)
+            if error is not None:
+                record_error(model, 502, str(error),
+                             elapsed_ms=int((time.time() - t_start) * 1000),
+                             account=account.uid)
+                return self._error(502, f"upstream stream error: {error}")
+            wall = int((time.time() - t_start) * 1000)
+            first_at = result.get("first_chunk_at")
+            # Measured from request arrival so streaming and non-streaming are comparable.
+            first_ms = int((first_at - t_start) * 1000) if first_at else None
+            record_usage(model, result.get("usage"), stream=False,
+                         elapsed_ms=wall, ttft_ms=first_ms,
+                         gen_ms=(wall - first_ms) if first_ms is not None else None,
+                         fp=fp, account=account.uid)
+            return self._json(200, result)
+        finally:
+            # The outer ``with upstream`` owns the first response.  A retry
+            # creates a replacement response that must be closed here.
+            if active is not upstream:
+                try:
+                    active.close()
+                except Exception:
+                    pass
 
 def main():
     args = _parse_cli_args()
