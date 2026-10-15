@@ -118,8 +118,8 @@ class NagleFlagTests(unittest.TestCase):
             def setup(self):
                 super().setup()
                 self.__class__.seen.append(
-                    self.connection.getsockopt(socket.IPPROTO_TCP,
-                                               socket.TCP_NODELAY))
+                    bool(self.connection.getsockopt(socket.IPPROTO_TCP,
+                                                    socket.TCP_NODELAY)))
                 self.__class__.done.set()
 
             def handle(self):
@@ -140,7 +140,7 @@ class NagleFlagTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
-        self.assertEqual(Probe.seen, [1],
+        self.assertEqual(Probe.seen, [True],
                          "TCP_NODELAY is not set on the accepted connection")
 
 

@@ -36,6 +36,12 @@ class EgressKeyTests(unittest.TestCase):
 
     URL = "https://www.workbuddy.ai/v2/chat/completions"
 
+    def setUp(self):
+        # Each identity case owns the bypass policy, independent of host proxy settings.
+        bypass = mock.patch.object(wb_upstream_pool, "_proxy_bypassed", return_value=False)
+        bypass.start()
+        self.addCleanup(bypass.stop)
+
     def test_direct_is_one_shared_egress(self):
         # No proxy: every account goes out the same way, so they share a key.
         self.assertEqual(wb_upstream_pool.egress_key(self.URL, ""),

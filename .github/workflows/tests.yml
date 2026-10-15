@@ -1,5 +1,8 @@
 name: tests
 
+permissions:
+  contents: read
+
 # Pushes are covered on main only; every other branch (and every pull request,
 # including ones from forks) is covered by pull_request. Listing both events
 # without the branch filter ran each update twice - two full windows + ubuntu
